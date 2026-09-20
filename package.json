@@ -84,6 +84,13 @@
             "path": "/sap/opu/odata/sap/API_BUSINESS_PARTNER"
           }
         }
+      },
+      "data-federation": {
+        "management": {
+          "reuse": {
+            "api": true
+          }
+        }
       }
     }
   },
