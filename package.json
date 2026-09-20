@@ -90,6 +90,10 @@
           "reuse": {
             "api": true
           }
+        },
+        "metrics": {
+          "enabled": true,
+          "persistenceInterval": 15000
         }
       }
     }
