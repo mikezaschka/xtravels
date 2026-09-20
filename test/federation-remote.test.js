@@ -50,7 +50,20 @@ suite('federation against real remotes (HCQL + OData V4)', () => {
         })
     })
 
+    /**
+     * Turns the event-driven refresh in srv/showcase/showcase-service.js off
+     * for one describe, so the *pull-based* behaviour stays observable: without
+     * this, ReserveSeats below would refresh the replica on its own and these
+     * tests would be asserting the wrong mechanism.
+     */
+    const pullOnly = () => {
+        before(() => { cds.env.showcase = { ...cds.env.showcase, eventRefresh: false } })
+        after(() => { cds.env.showcase.eventRefresh = true })
+    }
+
     describe('@federation.replicate over HCQL (Flights, Supplements)', () => {
+
+        pullOnly()
 
         it('copies every remote row into the local table', async () => {
             const remote = await onRemote(SELECT.from(`${FLIGHTS}.Flights`))
@@ -98,6 +111,119 @@ suite('federation against real remotes (HCQL + OData V4)', () => {
             )
             return data.value[0]
         }
+    })
+
+    /**
+     * The fourth replication trigger. schedule, preload and manual are all
+     * pull-based: the replica is only as fresh as the last run. `executeEvent`
+     * (ADR 0013) adds push — the remote says which row changed, and exactly
+     * that row is re-read through the consumption view.
+     *
+     * xflights emits `FlightsUpdated` from ReserveSeats and ReleaseSeats. It
+     * reaches this process through CAP's file-based messaging: both apps
+     * declare `messaging: true` and so share ~/.cds-msg-box. That only happens
+     * with the provider running as its own process, which is why this belongs
+     * here and not in the mocked suites.
+     */
+    describe('event-driven refresh of the replica (FlightsUpdated)', () => {
+
+        before(() => { cds.env.showcase = { ...cds.env.showcase, eventRefresh: true } })
+
+        const REPLICA = 'sap.capire.xflights.Flights'
+
+        const seats = async (ID, date) =>
+            (await SELECT.one`free_seats`.from(REPLICA).where({ ID, date }))?.free_seats
+
+        /** The provider's own value — the oracle the replica has to converge on. */
+        const remoteSeats = async (ID, date) => (await onRemote(
+            SELECT.one.from(`${FLIGHTS}.Flights`).columns('free_seats').where({ ID, date }),
+        ))?.free_seats
+
+        /** Messaging polls the box every 500ms, so the event arrives a beat late. */
+        const eventually = async (predicate, timeout = 15000) => {
+            const deadline = Date.now() + timeout
+            for (;;) {
+                const value = await predicate()
+                if (value) return value
+                if (Date.now() > deadline) return undefined
+                await new Promise(resolve => setTimeout(resolve, 200))
+            }
+        }
+
+        const eventRuns = async () => {
+            const { data } = await GET(
+                "/pipeline/PipelineRuns?$filter=pipeline_name eq 'Flights' and trigger eq 'event'"
+                + '&$orderby=startTime desc&$top=1',
+            )
+            return data.value
+        }
+
+        it('refreshes just the changed row, with no run of our own', async () => {
+            const { ID, date } = await SELECT.one`ID, date`.from(REPLICA).orderBy('ID')
+            const before_ = await seats(ID, date)
+
+            const flights = await cds.connect.to(FLIGHTS)
+            await flights.send('ReserveSeats', { flight: ID, date, seats: [1] })
+            const target = await remoteSeats(ID, date)
+            expect(target, 'the reservation did not change the remote').to.be.below(before_)
+
+            // Note what is *not* here: no POST /pipeline/execute. If the replica
+            // converges, the remote's event is the only thing that could have
+            // done it — the schedule is ten minutes wide.
+            const refreshed = await eventually(async () => await seats(ID, date) === target)
+            expect(refreshed, 'replica did not converge on the remote in time').to.be.true
+        })
+
+        it('records it as a run with trigger event, counting one updated row', async () => {
+            const { ID, date } = await SELECT.one`ID, date`.from(REPLICA).orderBy('ID desc')
+            const before_ = await seats(ID, date)
+
+            const flights = await cds.connect.to(FLIGHTS)
+            await flights.send('ReserveSeats', { flight: ID, date, seats: [1] })
+            const target = await remoteSeats(ID, date)
+            expect(target).to.be.below(before_)
+            await eventually(async () => await seats(ID, date) === target)
+
+            const [run] = await eventually(async () => {
+                const runs = await eventRuns()
+                return runs.length ? runs : undefined
+            }) ?? []
+            expect(run, 'no run with trigger event').to.exist
+            expect(run.status).to.equal('completed')
+            // One row addressed by key, so one row written — not a full reload.
+            // Writes are UPSERTs, and the database cannot say whether a given
+            // one inserted or updated, so the two counters are summed here the
+            // same way the scheduled-run test above sums them.
+            expect(run.statistics_created + run.statistics_updated).to.equal(1)
+            expect(run.statistics_deleted).to.equal(0)
+        })
+
+        it('leaves the replica alone when the refresh is switched off', async () => {
+            // The falsification: if the assertions above passed because of
+            // something other than the event — a stray scheduled tick, another
+            // test's execute — they would keep passing here.
+            cds.env.showcase.eventRefresh = false
+            try {
+                const { ID, date } = await SELECT.one`ID, date`.from(REPLICA).orderBy('ID')
+                const before_ = await seats(ID, date)
+
+                const flights = await cds.connect.to(FLIGHTS)
+                await flights.send('ReserveSeats', { flight: ID, date, seats: [1] })
+
+                const moved = await eventually(async () => await seats(ID, date) !== before_, 4000)
+                expect(moved, 'replica changed with the event refresh off').to.be.undefined
+                expect(await seats(ID, date)).to.equal(before_)
+
+                // Still reconcilable the pull way. Compare against the remote
+                // rather than `before_ - 1`: a delta run also picks up anything
+                // else outstanding, so the remote's value is the only oracle
+                // that holds however this test is reached.
+                await POST('/pipeline/execute', { name: 'Flights' })
+                expect(await seats(ID, date)).to.equal(await remoteSeats(ID, date))
+            } finally {
+                cds.env.showcase.eventRefresh = true
+            }
+        })
     })
 
     describe('@federation.replicate over OData V4 (Customers)', () => {
@@ -223,6 +349,8 @@ suite('federation against real remotes (HCQL + OData V4)', () => {
 
 
     describe('mashups over the real remote', () => {
+
+        pullOnly() // 'serves live seats next to the replica' needs the replica to lag
 
         it('resolves a delegated expand on the remote, in one request', async () => {
             const [{ ID }] = await onRemote(SELECT.from(AIRLINES).columns('ID').orderBy('ID'))

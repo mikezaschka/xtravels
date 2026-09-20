@@ -28,6 +28,7 @@ entity Flights as projection on external.Flights { ... }
 | The hand-written sync, and the one-line hook that loaded it, deleted | `srv/data-federation.js`, `srv/server.js` |
 | The two plugins, `cds-caching`, the pipeline management console, and a `federated` profile binding the remotes to local processes | [`package.json`](package.json) |
 | `FederationShowcaseService`: live delegation, both caches, write-through, scoped views. Additive, so `TravelService` and the UI never see it | [`srv/showcase/`](srv/showcase/) |
+| Event-driven refresh of the replica on the remote's `FlightsUpdated`, replacing the hand-written read-and-UPDATE that upstream kept in `service_integration()` | [`srv/showcase/showcase-service.js`](srv/showcase/showcase-service.js), `srv/travel-service/service.js` |
 | Suites for every federated entity, in-process and against real remotes | [`test/`](test/) |
 | This readme | `readme.md` |
 
@@ -151,7 +152,7 @@ three ways here. Any difference in behaviour is the strategy and nothing else.
 
 | | replicate | delegate | + entity cache | + response cache |
 |---|---|---|---|---|
-| Sees a remote change | after the next run | immediately | after TTL / refresh | after TTL / invalidation |
+| Sees a remote change | after the next run, or at once given an event | immediately | after TTL / refresh | after TTL / invalidation |
 | Arbitrary `$filter` / `$orderby` | yes, SQL | yes, at the remote | yes, SQL over the snapshot | yes, but each distinct query is a miss |
 | Reads reaching the remote | none | one per request | none within the TTL | one per *distinct* query |
 | Joinable with local tables | **yes** | no | no | no |
@@ -236,6 +237,42 @@ an external scheduler (BTP Job Scheduling, a Kubernetes CronJob) drives it with
 `POST /pipeline/execute`. The plugin says as much in the log when it finds an
 in-process schedule.
 
+#### The fourth trigger: a remote event
+
+`schedule`, `preload` and `POST /pipeline/execute` are all pull-based, so the
+replica is only ever as fresh as the last run. When the remote can say *which
+row* changed, a pipeline can be run for that row alone:
+
+```js
+// srv/showcase/showcase-service.js
+xflights.on('FlightsUpdated', async ({ data: { flight: ID, date } }) => {
+  await pipelines.executeEvent('Flights', { event: { read: 'key', keys: { ID, date } } })
+})
+```
+
+xflights emits `FlightsUpdated` from its own `ReserveSeats` and `ReleaseSeats`
+actions, so booking a seat refreshes that flight in the replica within the
+event instead of up to ten minutes later. `read: 'key'` re-reads the row from
+the remote through the consumption view, so every projected column is refreshed
+and a static `where` still applies; `read: 'payload'` takes the row straight
+from the event when it is already source-shaped. `event.action: 'delete'`
+removes the local row instead.
+
+The run is a real run: retried on failure, serialized against a concurrent
+scheduled run, and listed in the Console with `trigger: 'event'` next to the
+scheduled ones. Set `cds.showcase.eventRefresh: false` in `package.json` to
+switch it off and watch the pull-only behaviour instead.
+
+Upstream did this by hand in `srv/travel-service/service.js`, guarded by
+`@cds.persistence.table`, an annotation its own `srv/data-federation.js` set on
+every `@federated` entity. This branch deletes that file, and
+`cds-data-federation` sets the annotation `false` on derived service-level
+projections (they stay views over the replica rather than getting a table of
+their own), so the guard was never true and the hand-written handler silently
+stopped registering. Worth knowing if you port other `@federated` code: a guard
+on that annotation is reading an implementation detail of the code this branch
+removes.
+
 #### Delegation
 
 ```cds
@@ -294,6 +331,13 @@ The remote suites assert that each remote connects as a `RemoteService`, and two
 of them kill a provider mid-test: a replicated or snapshot-backed read keeps
 working, a live delegate does not. Tests that pass without any network traffic
 would not tell you whether federation works.
+
+Event-driven refresh is only covered there for the same reason: the event has to
+travel between two processes through CAP's messaging, so an in-process mock
+cannot exercise it. Those three tests reserve a seat on the real provider and
+assert the replica converges with no run of their own, that the run is recorded
+with `trigger: 'event'` and one written row, and that switching the refresh off
+leaves the replica stale until a pull.
 
 ### What this turned up in CAP
 

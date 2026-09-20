@@ -21,7 +21,7 @@ class TravelService extends cds.ApplicationService {
     const s4 = await cds.connect.to ('sap.capire.s4.business-partner')
     const xflights = await cds.connect.to ('sap.capire.flights.FlightsService')
     const yfligths = cds.outboxed (xflights)
-    const { Flights, Travels, Customers } = this.entities
+    const { Travels, Customers } = this.entities
     const { Bookings } = cds.entities ('sap.capire.travels')
 
     // Delegate value help requests on Customers to S4 Business Partner service
@@ -47,12 +47,10 @@ class TravelService extends cds.ApplicationService {
       await UPDATE(Bookings, { Travel_ID, Pos }).set({ Status_code: 'F' })
     })
 
-    // Update local Flights data whenever occupied seats change in XFlights
-    if (Flights['@cds.persistence.table']) xflights.on ('FlightsUpdated', async function(msg) {
-      const { flight:ID, date } = msg.data
-      const { free_seats } = await xflights.read `free_seats` .from (Flights, { ID, date })
-      await UPDATE(Flights, { ID, date }).with({ free_seats })
-    })
+    // Upstream kept a hand-written read-and-UPDATE here to refresh the local
+    // Flights row on the remote's FlightsUpdated event. It is replaced by an
+    // event-driven pipeline run in srv/showcase/showcase-service.js — see the
+    // comment there for why the original stopped working on this branch.
   }
 
 
