@@ -11,7 +11,10 @@
     "@capire/common": "*",
     "@capire/s4": "*",
     "@capire/xflights-data": "*",
-    "@sap/cds": "^10"
+    "@sap/cds": "^10",
+    "cds-data-federation": ">=0.4.0",
+    "cds-data-pipeline": ">=0.4.0",
+    "cds-caching": "^1"
   },
   "devDependencies": {
     "@cap-js/cds-test": "^1",
@@ -23,6 +26,38 @@
       "sap.capire.flights.FlightsService": true,
       "sap.capire.hotels.HotelsService": true,
       "sap.capire.events.EventsService": true,
+      "data-pipeline": {
+        "impl": "cds-data-pipeline",
+        "management": {
+          "reuse": {
+            "api": true,
+            "console": true
+          }
+        }
+      },
+      "[federated]": {
+        "sap.capire.flights.FlightsService": {
+          "kind": "hcql",
+          "credentials": {
+            "url": "http://localhost:4006/hcql/flights"
+          }
+        },
+        "sap.capire.s4.business-partner": {
+          "kind": "odata",
+          "credentials": {
+            "url": "http://localhost:4009/odata/v4/api-business-partner"
+          }
+        },
+        "sap.capire.hotels.HotelsService": {
+          "kind": "odata",
+          "credentials": {
+            "url": "http://localhost:4008/odata/v4/hotels"
+          }
+        }
+      },
+      "caching": {
+        "impl": "cds-caching"
+      },
       "[production]": {
         "sap.capire.flights.FlightsService": {
           "kind": "hcql",

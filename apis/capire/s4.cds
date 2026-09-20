@@ -1,7 +1,14 @@
 using { API_BUSINESS_PARTNER as S4 } from '@capire/s4';
 namespace sap.capire.s4;
 
-@federated entity Customers as projection on S4.A_BusinessPartner {
+// Full sync: the static `where` below is not combined with OData
+// `datetime-fields` delta filters (LastChangeDate + LastChangeTime).
+@federation.replicate: {
+  mode: 'full',
+  schedule: 600000,
+  preload: true,
+}
+entity Customers as projection on S4.A_BusinessPartner {
 
   BusinessPartner as ID,
   PersonFullName  as Name,

@@ -1,0 +1,17 @@
+{
+  "name": "xtravels-s4-provider",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Serves the S/4 Business Partner API over OData V4 and V2 \u2014 the protocol xtravels' [production] profile binds \u2014 seeded with a few organizations the shipped sample data lacks.",
+  "scripts": {
+    "start": "cds mock API_BUSINESS_PARTNER"
+  },
+  "dependencies": {
+    "@sap/cds": ">=9",
+    "@cap-js-community/odata-v2-adapter": "^1",
+    "express": "^4"
+  },
+  "devDependencies": {
+    "@cap-js/sqlite": ">=2"
+  }
+}
