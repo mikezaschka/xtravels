@@ -88,7 +88,8 @@
       "data-federation": {
         "management": {
           "reuse": {
-            "api": true
+            "api": true,
+            "console": true
           }
         },
         "metrics": {
