@@ -26,7 +26,7 @@ entity Flights as projection on external.Flights { ... }
 | `@federated` becomes `@federation.replicate: { ... }` on `Flights` and `Supplements` | [`apis/capire/xflights.cds`](apis/capire/xflights.cds) |
 | The same on `Customers`, which syncs `mode: 'full'` | [`apis/capire/s4.cds`](apis/capire/s4.cds) |
 | The hand-written sync, and the one-line hook that loaded it, deleted | `srv/data-federation.js`, `srv/server.js` |
-| The two plugins, `cds-caching`, the pipeline management console, and a `federated` profile binding the remotes to local processes | [`package.json`](package.json) |
+| The two plugins and `cds-caching`, all three consoles with delegate and tag metrics switched on, and a `federated` profile binding the remotes to local processes | [`package.json`](package.json) |
 | `FederationShowcaseService`: live delegation, both caches, write-through, scoped views. Additive, so `TravelService` and the UI never see it | [`srv/showcase/`](srv/showcase/) |
 | Event-driven refresh of the replica on the remote's `FlightsUpdated`, replacing the hand-written read-and-UPDATE that upstream kept in `service_integration()` | [`srv/showcase/showcase-service.js`](srv/showcase/showcase-service.js), `srv/travel-service/service.js` |
 | Suites for every federated entity, in-process and against real remotes | [`test/`](test/) |
@@ -35,8 +35,9 @@ entity Flights as projection on external.Flights { ... }
 Everything else is untouched: the Fiori app, the draft and status flows, the
 `ReserveSeats` saga to xflights, the live S/4 value help, and upstream's own test
 suite, which still passes unchanged. On top of what the custom code did, the
-annotations bring run history, retry, a concurrency guard, a management API and
-the Pipeline Console.
+annotations bring run history, retry, a concurrency guard, per-delegate metrics,
+and two consoles: one for every federated entity, one for the pipelines behind
+the replicas.
 
 ## Details
 
@@ -83,17 +84,57 @@ command does all four: `npm run examples:start:xtravels`.
 
 ### Where to look
 
+Everything on port 4005 needs a login — `alice` / `admin`. That includes the
+consoles and their APIs, which require an authenticated user by default.
+
 | URL | What you get |
 |---|---|
-| http://localhost:4005/travels/webapp/index.html | The Fiori app, unchanged (log in as `alice` / `admin`) |
-| http://localhost:4005/pipeline-console/ | **Pipeline Console** — see below |
+| http://localhost:4005/travels/webapp/index.html | The Fiori app, unchanged |
+| http://localhost:4005/federation-console/ | **Federation Console** — every federated entity, delegates included; see below |
+| http://localhost:4005/federation/FederatedEntities | Its API: one row per `@federation.*` entity |
+| http://localhost:4005/federation/DelegateMetrics | Request, error and latency counters per delegate |
+| http://localhost:4005/pipeline-console/ | **Pipeline Console** — the replication and entity-cache pipelines |
 | http://localhost:4005/pipeline/Pipelines | Management API: the registered pipelines |
 | http://localhost:4005/pipeline/PipelineRuns | Every run with status, trigger, timings and row counts |
+| http://localhost:4005/caching-dashboard/ | `cds-caching` dashboard: hit ratios for the response caches |
 | http://localhost:4005/showcase/ | The delegation showcase (OData) |
 | http://localhost:4005/odata/v4/travel/ | `TravelService`, as upstream ships it |
 | http://localhost:4006/odata/v4/flights/Flights | xflights, the remote behind Flights (HCQL at `/hcql/flights`) |
 | http://localhost:4008/odata/v4/hotels/Hotels | The bundled hotels microservice |
 | http://localhost:4009/odata/v4/api-business-partner/A_BusinessPartner | S/4 Business Partner API (V2 at `/odata/v2/...`) |
+
+### The Federation Console
+
+Open **http://localhost:4005/federation-console/**. The Pipeline Console only
+sees what runs as a pipeline, and eight of the eleven federated entities here are
+plain delegates with no pipeline at all. This console lists all of them.
+
+The first tab is the inventory: strategy, cache, source, whether the view is
+writable or scoped, and the pipeline behind it where there is one. Filter by
+strategy, or search by entity or source service. Open an entity for its resolved
+projection — which remote columns it fetches, what it renames, whether a static
+`where` applies — plus the actions its strategy supports: refresh a replica,
+refill a snapshot, or invalidate a response cache. The **Landscape** tab draws
+the three remote services against every consumption view, delegates included.
+
+Delegates carry live counters here because this app switches on delegate
+metrics: requests, errors and average latency per entity, flushed every 15
+seconds. Read a few showcase entities and open them after the next flush:
+
+```sh
+curl -u alice:admin http://localhost:4005/showcase/Airlines
+```
+```sh
+curl -u alice:admin "http://localhost:4005/federation/DelegateMetrics?\$select=entity,requests,errors,avgLatency"
+```
+
+The **Collect metrics** switch in the console header pauses and resumes
+collection, and the choice survives a restart. It cannot switch metrics on from
+nothing: that is `metrics.enabled` at startup, so an app that never enables them
+carries no instrumentation on the request path.
+
+The console links out rather than duplicating: run history stays in the Pipeline
+Console, and response-cache hit ratios in the caching dashboard.
 
 ### The Pipeline Console
 
@@ -178,7 +219,17 @@ consumption view asks for in its annotation.
       "impl": "cds-data-pipeline",
       "management": { "reuse": { "api": true, "console": true } }
     },
-    "caching": { "impl": "cds-caching" },
+    "data-federation": {
+      "management": { "reuse": { "api": true, "console": true } },
+      "metrics": { "enabled": true, "persistenceInterval": 15000 }
+    },
+    "caching": {
+      "impl": "cds-caching",
+      "metrics": {
+        "enabled": true, "tagMetricsEnabled": true,
+        "reuse": { "api": true, "dashboard": true }
+      }
+    },
 
     // Bindings per profile. Without one of these, CAP mocks the service
     // in-process and nothing crosses the network.
@@ -202,11 +253,24 @@ consumption view asks for in its annotation.
 }
 ```
 
-`management.reuse.api` serves the management service at `/pipeline`, and
-`.console` adds the UI at `/pipeline-console`. Switching the console on implies
-the API, since it is a client of it. Both can be left off entirely: pipelines
-run either way, you just lose the operator surface. `caching` is only needed for
-`cache.strategy: 'response'`.
+Each plugin switches its operator surface on the same way, `<feature>.reuse.api`
+and `.console` (or `.dashboard`). On `data-pipeline` that serves `/pipeline` and
+`/pipeline-console`; on `data-federation`, `/federation` and
+`/federation-console`. Switching a console on implies its API, since it is a
+client of it. All of it can be left off: pipelines and delegates run either way,
+you just lose the operator surface.
+
+`data-federation.metrics` instruments the delegate path. It is off by default and
+costs nothing when off — the handlers are not even wrapped — and the demo flushes
+every 15 seconds instead of the default 60 so the numbers show up while you are
+looking. On `caching`, `tagMetricsEnabled` is what attributes a response cache's
+hit ratio to one entity, through the `federation:<Entity>` tag every entry
+carries. `caching` is only needed for `cache.strategy: 'response'`.
+
+All three management APIs and consoles require an authenticated user.
+`annotate FederationManagementService with @requires: null;` (or the pipeline's
+`DataPipelineManagementService`) opens one deliberately, console and API
+together.
 
 `kind` decides the protocol: `hcql` and `odata` here, `odata-v2` for the real
 S/4 in `[production]`. The demo binds URLs because the providers are local;
